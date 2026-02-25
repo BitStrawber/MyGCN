@@ -284,16 +284,19 @@ class Loader(BasicDataset):
         self.users_D[self.users_D == 0.] = 1
         self.items_D = np.array(self.UserItemNet.sum(axis=0)).squeeze()
         self.items_D[self.items_D == 0.] = 1.
-        # pre-calculate
-        self._allPos = self.getUserPosItems(list(range(self.n_user)))
-        self._allNeg = [np.array([], dtype=np.int64) for _ in range(self.n_user)]
-        self.signed_train_users = self.trainUniqueUsers
-        self.__testDict = self.__build_test()
 
         self.Graph_pos = None
         self.Graph_neg = None
         self.PathMats = None
         self._init_signed_feedback_if_needed()
+
+        # pre-calculate
+        self._allPos = self.getUserPosItems(list(range(self.n_user)))
+        if not hasattr(self, '_allNeg'):
+            self._allNeg = [np.array([], dtype=np.int64) for _ in range(self.n_user)]
+        if not hasattr(self, 'signed_train_users'):
+            self.signed_train_users = self.trainUniqueUsers
+        self.__testDict = self.__build_test()
         print(f"{world.dataset} is ready to go")
 
     @property
