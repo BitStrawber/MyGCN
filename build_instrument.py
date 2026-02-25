@@ -6,6 +6,8 @@ import os
 import urllib.request
 import numpy as np
 from collections import defaultdict
+from time import time
+from tqdm import tqdm
 
 
 DATASET_META = {
@@ -37,10 +39,61 @@ def parse_args():
     return parser.parse_args()
 
 
+def _format_seconds(seconds):
+    seconds = int(seconds)
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    if h > 0:
+        return f'{h}h {m}m {s}s'
+    if m > 0:
+        return f'{m}m {s}s'
+    return f'{s}s'
+
+
+def _download_with_progress(url, file_path):
+    pbar = None
+
+    def reporthook(block_num, block_size, total_size):
+        nonlocal pbar
+        if pbar is None:
+            total = total_size if total_size > 0 else None
+            pbar = tqdm(total=total, unit='B', unit_scale=True, desc='Downloading')
+        downloaded = block_num * block_size
+        if pbar.total is not None:
+            pbar.update(downloaded - pbar.n)
+        else:
+            pbar.update(block_size)
+
+    try:
+        urllib.request.urlretrieve(url, file_path, reporthook=reporthook)
+    finally:
+        if pbar is not None:
+            pbar.close()
+
+
+def _load_gzip_json_with_progress(file_path):
+    print('Counting raw lines for ETA...')
+    t0 = time()
+    total_lines = 0
+    with gzip.open(file_path, 'rb') as f:
+        for _ in f:
+            total_lines += 1
+    print(f'Line counting done: {total_lines} lines ({_format_seconds(time() - t0)})')
+
+    data = []
+    with gzip.open(file_path, 'rb') as f:
+        for line in tqdm(f, total=total_lines, desc='Parsing JSON lines', unit='line'):
+            data.append(json.loads(line))
+    return data
+
+
 def split_by_user(data_df):
     data_df = data_df.sort_values(['user_id', 'timestamp']).reset_index(drop=True)
     train_list, valid_list, test_list = [], [], []
-    for _, group in data_df.groupby('user_id'):
+    user_groups = data_df.groupby('user_id')
+    n_users = data_df['user_id'].nunique()
+    for _, group in tqdm(user_groups, total=n_users, desc='Splitting by user', unit='user'):
         n = len(group)
         if n >= 3:
             train_n = max(1, int(n * 0.7))
@@ -98,6 +151,7 @@ def build_signed_summary(train_pos_df, train_neg_df):
 
 
 def main():
+    total_t0 = time()
     args = parse_args()
     meta = DATASET_META[args.dataset]
 
@@ -112,21 +166,24 @@ def main():
         if args.skip_download == 1:
             raise FileNotFoundError(f'Raw file missing: {file_path}')
         print(f"Downloading {meta['name']} dataset from SNAP...")
-        urllib.request.urlretrieve(meta['url'], file_path)
+        stage_t0 = time()
+        _download_with_progress(meta['url'], file_path)
         print('Download success!')
+        print(f'Download time: {_format_seconds(time() - stage_t0)}')
     else:
         print(f'File already exists at {file_path}, skipping download.')
 
     print('Processing data (this may take a moment)...')
-    data = []
-    with gzip.open(file_path, 'rb') as f:
-        for line in f:
-            data.append(json.loads(line))
+    stage_t0 = time()
+    data = _load_gzip_json_with_progress(file_path)
+    print(f'Load+parse time: {_format_seconds(time() - stage_t0)}')
 
+    stage_t0 = time()
     df = pd.DataFrame(data)[['reviewerID', 'asin', 'overall', 'unixReviewTime']]
     df.columns = ['user', 'item', 'rating', 'timestamp']
     df['user_id'], user_index = pd.factorize(df['user'])
     df['item_id'], item_index = pd.factorize(df['item'])
+    print(f'Build DataFrame+ID map time: {_format_seconds(time() - stage_t0)}')
 
     print(f"Stats -> Users: {len(user_index)}, Items: {len(item_index)}, Total Interactions: {len(df)}")
     df['sign'] = np.where(df['rating'] >= 4.0, 1, -1)
@@ -135,17 +192,21 @@ def main():
     print(f"Positive Edges: {len(df_pos)}, Negative Edges: {len(df_neg)}")
 
     print('Splitting positive edges...')
+    stage_t0 = time()
     train_pos, valid_pos, test_pos = split_by_user(df_pos)
     print('Splitting negative edges...')
     train_neg, valid_neg, test_neg = split_by_user(df_neg)
+    print(f'Splitting time: {_format_seconds(time() - stage_t0)}')
 
     print(f'Writing files to {out_dir}...')
+    stage_t0 = time()
     write_grouped_txt(train_pos, os.path.join(out_dir, 'train.txt'))
     write_grouped_txt(valid_pos, os.path.join(out_dir, 'valid.txt'))
     write_grouped_txt(test_pos, os.path.join(out_dir, 'test.txt'))
     write_signed_triplet(train_pos, train_neg, os.path.join(out_dir, 'train_signed.txt'))
     write_mapping(os.path.join(out_dir, 'user_list.txt'), user_index)
     write_mapping(os.path.join(out_dir, 'item_list.txt'), item_index)
+    print(f'Write files time: {_format_seconds(time() - stage_t0)}')
 
     users_with_pos_and_neg = build_signed_summary(train_pos, train_neg)
     print('All Done! Preprocessing complete.')
@@ -153,6 +214,7 @@ def main():
     print(f'Users with both positive and negative train edges: {users_with_pos_and_neg}')
     print(f'Train/Valid/Test positive edges: {len(train_pos)}/{len(valid_pos)}/{len(test_pos)}')
     print(f'Train/Valid/Test negative edges: {len(train_neg)}/{len(valid_neg)}/{len(test_neg)}')
+    print(f'Total time: {_format_seconds(time() - total_t0)}')
 
 
 if __name__ == '__main__':
