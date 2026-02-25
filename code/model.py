@@ -264,12 +264,7 @@ class PCSRec(BasicModel):
             indices = path_mat.indices()
             if indices.shape[1] == 0:
                 continue
-            values = torch.full(
-                (indices.shape[1],),
-                theta_weight[path_id],
-                device=indices.device,
-                dtype=torch.float32
-            )
+            values = torch.ones(indices.shape[1], device=indices.device, dtype=torch.float32) * theta_weight[path_id]
             all_indices.append(indices)
             all_values.append(values)
         if len(all_indices) == 0:

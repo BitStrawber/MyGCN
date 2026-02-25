@@ -388,8 +388,9 @@ class Loader(BasicDataset):
 
     def _normalize_adj(self, adj):
         rowsum = np.array(adj.sum(axis=1)).flatten()
-        d_inv = np.power(rowsum, -0.5)
-        d_inv[np.isinf(d_inv)] = 0.
+        d_inv = np.zeros_like(rowsum, dtype=np.float32)
+        nonzero_mask = rowsum > 0
+        d_inv[nonzero_mask] = np.power(rowsum[nonzero_mask], -0.5)
         d_mat = sp.diags(d_inv)
         return d_mat.dot(adj).dot(d_mat).tocsr()
 
