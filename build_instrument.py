@@ -10,17 +10,17 @@ from collections import defaultdict
 
 DATASET_META = {
     'amazon_instrument': {
-        'url': 'http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Musical_Instruments_5.json.gz',
+        'url': 'https://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Musical_Instruments_5.json.gz',
         'file': 'Musical_Instruments_5.json.gz',
         'name': 'Amazon-Instrument',
     },
     'amazon_video': {
-        'url': 'http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Video_Games_5.json.gz',
-        'file': 'Video_Games_5.json.gz',
+        'url': 'https://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Amazon_Instant_Video_5.json.gz',
+        'file': 'Amazon_Instant_Video_5.json.gz',
         'name': 'Amazon-Video',
     },
     'amazon_crafts': {
-        'url': 'http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Arts_Crafts_and_Sewing_5.json.gz',
+        'url': 'https://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Arts_Crafts_and_Sewing_5.json.gz',
         'file': 'Arts_Crafts_and_Sewing_5.json.gz',
         'name': 'Amazon-Crafts',
     },
