@@ -51,6 +51,9 @@ config['beta'] = args.beta
 config['gamma'] = args.gamma
 config['tau'] = args.tau
 config['enable_signed'] = (args.model == 'pcsrec')
+config['eval_interval'] = args.eval_interval
+config['early_stop_patience'] = args.early_stop_patience
+config['early_stop_min_delta'] = args.early_stop_min_delta
 
 GPU = torch.cuda.is_available()
 device = torch.device('cuda' if GPU else "cpu")

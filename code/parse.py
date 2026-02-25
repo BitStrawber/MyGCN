@@ -47,4 +47,9 @@ def parse_args():
     parser.add_argument('--beta', type=float, default=1.0, help='Strength of negative feedback in BPR.')
     parser.add_argument('--gamma', type=float, default=0.01, help='Weight of contrastive loss.')
     parser.add_argument('--tau', type=float, default=0.2, help='Temperature in contrastive loss.')
+    parser.add_argument('--eval_interval', type=int, default=10, help='Evaluate test/valid every N epochs.')
+    parser.add_argument('--early_stop_patience', type=int, default=0,
+                        help='Early stop patience based on valid NDCG@max(topk). 0 disables early stopping.')
+    parser.add_argument('--early_stop_min_delta', type=float, default=0.0,
+                        help='Minimum NDCG improvement to reset early stopping counter.')
     return parser.parse_args()

@@ -56,13 +56,18 @@ else:
 try:
     train_total_start = time.time()
     best_ndcg = None
+    no_improve_rounds = 0
+    eval_interval = max(1, int(world.config.get('eval_interval', 10)))
+    early_stop_patience = int(world.config.get('early_stop_patience', 0))
+    early_stop_min_delta = float(world.config.get('early_stop_min_delta', 0.0))
     for epoch in range(world.TRAIN_epochs):
         epoch_start = time.time()
         test_time = 0.0
         valid_time = 0.0
         train_time = 0.0
         curr_valid_ndcg = None
-        if epoch %10 == 0:
+        should_eval = (epoch % eval_interval == 0)
+        if should_eval:
             cprint("[TEST]")
             t0 = time.time()
             test_results = Procedure.Test(dataset, Recmodel, epoch, w, world.config['multicore'])
@@ -79,10 +84,15 @@ try:
                                                tag='Valid')
                 valid_time = time.time() - t0
                 curr_valid_ndcg = float(valid_results['ndcg'][-1]) if len(valid_results['ndcg']) > 0 else None
-                if curr_valid_ndcg is not None and (best_ndcg is None or curr_valid_ndcg > best_ndcg):
+                if curr_valid_ndcg is not None and (best_ndcg is None or curr_valid_ndcg > best_ndcg + early_stop_min_delta):
                     best_ndcg = curr_valid_ndcg
                     torch.save(Recmodel.state_dict(), best_weight_file)
+                    no_improve_rounds = 0
                     print(f"[BEST] epoch={epoch+1} valid_ndcg@{world.topks[-1]}={best_ndcg:.6f}")
+                elif curr_valid_ndcg is not None:
+                    no_improve_rounds += 1
+                    if early_stop_patience > 0:
+                        print(f"[EARLY-STOP-CHECK] no_improve={no_improve_rounds}/{early_stop_patience}")
         if world.model_name == 'pcsrec':
             t0 = time.time()
             pcs_loss = Procedure.train_PCSRec(dataset, Recmodel, None, epoch, w=w)
@@ -103,6 +113,10 @@ try:
             f"elapsed={_format_seconds(elapsed)}, eta={_format_seconds(eta)}"
         )
         torch.save(Recmodel.state_dict(), weight_file)
+
+        if early_stop_patience > 0 and no_improve_rounds >= early_stop_patience:
+            print(f"[EARLY-STOP] Stop at epoch {epoch+1}, best_valid_ndcg@{world.topks[-1]}={best_ndcg:.6f}")
+            break
 finally:
     total_train_time = time.time() - train_total_start if 'train_total_start' in locals() else 0.0
     print(f"Training total time: {_format_seconds(total_train_time)}")

@@ -104,6 +104,9 @@ def run_train_one_seed(code_dir, dataset, seed, base_args, topks):
         f"--epochs={base_args.epochs}",
         f"--topks={topks}",
         f"--tensorboard={base_args.tensorboard}",
+        f"--eval_interval={base_args.eval_interval}",
+        f"--early_stop_patience={base_args.early_stop_patience}",
+        f"--early_stop_min_delta={base_args.early_stop_min_delta}",
         f'--seed={seed}',
     ]
 
@@ -182,6 +185,9 @@ def parse_args():
     parser.add_argument('--testbatch', type=int, default=256)
     parser.add_argument('--topks', type=str, default='[10,20]')
     parser.add_argument('--tensorboard', type=int, default=0)
+    parser.add_argument('--eval_interval', type=int, default=5)
+    parser.add_argument('--early_stop_patience', type=int, default=6)
+    parser.add_argument('--early_stop_min_delta', type=float, default=1e-4)
 
     parser.add_argument('--output_dir', type=str, default='reports/paper_benchmark')
     return parser.parse_args()
@@ -261,6 +267,9 @@ def main():
             'decay': args.decay,
             'testbatch': args.testbatch,
             'tensorboard': args.tensorboard,
+            'eval_interval': args.eval_interval,
+            'early_stop_patience': args.early_stop_patience,
+            'early_stop_min_delta': args.early_stop_min_delta,
         },
         'results': all_results,
     }
