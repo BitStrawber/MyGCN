@@ -40,21 +40,16 @@ def BPR_train_original(dataset, recommend_model, loss_class, epoch, neg_k=1, w=N
     users, posItems, negItems = utils.shuffle(users, posItems, negItems)
     total_batch = len(users) // world.config['bpr_batch_size'] + 1
     aver_loss = 0.
-    batch_iter = utils.minibatch(users,
-                                 posItems,
-                                 negItems,
-                                 batch_size=world.config['bpr_batch_size'])
-    progress = tqdm(batch_iter,
-                    total=total_batch,
-                    desc=f"Train Epoch {epoch + 1}",
-                    leave=False)
+        batch_iter = utils.minibatch(users,
+                                                                 posItems,
+                                                                 negItems,
+                                                                 batch_size=world.config['bpr_batch_size'])
     for (batch_i,
          (batch_users,
           batch_pos,
-          batch_neg)) in enumerate(progress):
+                    batch_neg)) in enumerate(batch_iter):
         cri = bpr.stageOne(batch_users, batch_pos, batch_neg)
         aver_loss += cri
-        progress.set_postfix(loss=f"{cri:.4f}")
         if world.tensorboard:
             w.add_scalar(f'BPRLoss/BPR', cri, epoch * int(len(users) / world.config['bpr_batch_size']) + batch_i)
     aver_loss = aver_loss / total_batch
@@ -187,11 +182,7 @@ def train_PCSRec(dataset, recommend_model, loss_class, epoch, w=None):
                                  unobsPos,
                                  unobsNeg,
                                  batch_size=world.config['bpr_batch_size'])
-    progress = tqdm(batch_iter,
-                    total=total_batch,
-                    desc=f"Train Epoch {epoch + 1}",
-                    leave=False)
-    for (batch_i, (batch_users, batch_pos, batch_neg, batch_upos, batch_uneg)) in enumerate(progress):
+    for (batch_i, (batch_users, batch_pos, batch_neg, batch_upos, batch_uneg)) in enumerate(batch_iter):
         
         loss = recommend_model.calculate_loss(batch_users, batch_pos, batch_neg, batch_upos, batch_uneg)
         
@@ -200,7 +191,6 @@ def train_PCSRec(dataset, recommend_model, loss_class, epoch, w=None):
         recommend_model.optimizer.step()
         
         aver_loss += loss.item()
-        progress.set_postfix(loss=f"{loss.item():.4f}")
         if world.tensorboard and w is not None:
             w.add_scalar('PCSRec/Loss', loss.item(), epoch * total_batch + batch_i)
 
