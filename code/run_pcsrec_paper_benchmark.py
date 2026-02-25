@@ -50,6 +50,7 @@ def run_and_stream(cmd, cwd):
     omp_val = env.get('OMP_NUM_THREADS', '').strip()
     if (not omp_val.isdigit()) or int(omp_val) <= 0:
         env['OMP_NUM_THREADS'] = '1'
+    env['PYTHONUNBUFFERED'] = '1'
 
     proc = subprocess.Popen(
         cmd,
@@ -77,6 +78,7 @@ def run_preprocess(repo_root, dataset):
     print(f"\n===== Preprocess: {dataset} =====")
     cmd = [
         sys.executable,
+        '-u',
         'build_instrument.py',
         '--dataset',
         dataset,
@@ -88,6 +90,7 @@ def run_train_one_seed(code_dir, dataset, seed, base_args, topks):
     hp = DATASET_HPARAMS[dataset]
     cmd = [
         sys.executable,
+        '-u',
         'main.py',
         f'--dataset={dataset}',
         '--model=pcsrec',
