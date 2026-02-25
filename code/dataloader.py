@@ -321,6 +321,60 @@ class Loader(BasicDataset):
             A_fold.append(self._convert_sp_mat_to_sp_tensor(A[start:end]).coalesce().to(world.device))
         return A_fold
 
+    def build_signed_graphs(self):
+        """
+        假设 self.train_pos_UserItemNet 和 self.train_neg_UserItemNet 已经是 
+        scipy.sparse.csr_matrix 格式的邻接矩阵（大小为 user_num x item_num）。
+        需要构建全图 |V|x|V| 的对称拉普拉斯矩阵。
+        """
+        # 1. 构建全图的正负邻接矩阵 (A+ 和 A-)
+        def build_symmetric_adj(R):
+            adj_mat = sp.dok_matrix((self.m_users + self.n_items, self.m_users + self.n_items), dtype=np.float32)
+            adj_mat = adj_mat.tolil()
+            R = R.tolil()
+            adj_mat[:self.m_users, self.m_users:] = R
+            adj_mat[self.m_users:, :self.m_users] = R.T
+            adj_mat = adj_mat.tocsr()
+            return adj_mat
+
+        A_pos = build_symmetric_adj(self.train_pos_UserItemNet)
+        A_neg = build_symmetric_adj(self.train_neg_UserItemNet)
+
+        # 2. 计算规范化的拉普拉斯卷积核 (D^{-1/2} A D^{-1/2})
+        def normalize_adj(adj):
+            rowsum = np.array(adj.sum(1))
+            d_inv = np.power(rowsum, -0.5).flatten()
+            d_inv[np.isinf(d_inv)] = 0.
+            d_mat_inv = sp.diags(d_inv)
+            norm_adj = d_mat_inv.dot(adj).dot(d_mat_inv)
+            return self._convert_sp_mat_to_sp_tensor(norm_adj) # LightGCN自带的转换函数
+
+        self.Graph_pos = normalize_adj(A_pos)
+        self.Graph_neg = normalize_adj(A_neg) # 注意：这里的 Graph_neg 是归一化后的 A^-
+
+        # 3. 为 PEE 模块构建 6 种二值化路径矩阵
+        # 由于全图乘法极其耗时且消耗内存，建议在 GPU 上使用 torch.sparse.mm
+        device = world.device
+        A_pos_t = self._convert_sp_mat_to_sp_tensor(A_pos).to(device)
+        A_neg_t = self._convert_sp_mat_to_sp_tensor(A_neg).to(device)
+
+        def binarize_sparse_tensor(sp_tensor):
+            indices = sp_tensor._indices()
+            # 提取非零元素位置，设权重为 1
+            return torch.sparse_coo_tensor(indices, torch.ones_like(sp_tensor._values()), sp_tensor.shape).coalesce()
+
+        # 1-hop
+        X1 = binarize_sparse_tensor(A_pos_t)
+        X2 = binarize_sparse_tensor(A_neg_t)
+        
+        # 2-hop (矩阵相乘然后二值化)
+        X3 = binarize_sparse_tensor(torch.sparse.mm(A_pos_t, A_pos_t.to_dense()).to_sparse()) # 简化运算，实际可根据图大小优化
+        X4 = binarize_sparse_tensor(torch.sparse.mm(A_pos_t, A_neg_t.to_dense()).to_sparse())
+        X5 = binarize_sparse_tensor(torch.sparse.mm(A_neg_t, A_pos_t.to_dense()).to_sparse())
+        X6 = binarize_sparse_tensor(torch.sparse.mm(A_neg_t, A_neg_t.to_dense()).to_sparse())
+
+        self.X_paths = [X1, X2, X3, X4, X5, X6]
+
     def _convert_sp_mat_to_sp_tensor(self, X):
         coo = X.tocoo().astype(np.float32)
         row = torch.Tensor(coo.row).long()

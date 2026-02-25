@@ -151,3 +151,33 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
             pool.close()
         print(results)
         return results
+
+def train_PCSRec(dataset, recommend_model, loss_class, epoch, w=None):
+    recommend_model.train()
+    
+    # 假设你已经写了一个新的 sampler 能够返回: user, pos_i, neg_i, unobs_pos, unobs_neg
+    # 注意：你需要改造原版 utils.py 中的 UniformSample_original 函数来适配符号图
+    S = utils.Signed_UniformSample_original(dataset)
+    users = torch.Tensor(S[:, 0]).long().to(world.device)
+    posItems = torch.Tensor(S[:, 1]).long().to(world.device)
+    negItems = torch.Tensor(S[:, 2]).long().to(world.device)
+    unobsPos = torch.Tensor(S[:, 3]).long().to(world.device)
+    unobsNeg = torch.Tensor(S[:, 4]).long().to(world.device)
+
+    users, posItems, negItems, unobsPos, unobsNeg = utils.shuffle(users, posItems, negItems, unobsPos, unobsNeg)
+    total_batch = len(users) // world.config['bpr_batch_size'] + 1
+    aver_loss = 0.
+
+    for (batch_i, (batch_users, batch_pos, batch_neg, batch_upos, batch_uneg)) in enumerate(
+        utils.minibatch(users, posItems, negItems, unobsPos, unobsNeg, batch_size=world.config['bpr_batch_size'])):
+        
+        loss = recommend_model.calculate_loss(batch_users, batch_pos, batch_neg, batch_upos, batch_uneg)
+        
+        recommend_model.optimizer.zero_grad()
+        loss.backward()
+        recommend_model.optimizer.step()
+        
+        aver_loss += loss.item()
+
+    aver_loss = aver_loss / total_batch
+    return aver_loss

@@ -10,6 +10,7 @@ Define models here
 import world
 import torch
 from dataloader import BasicDataset
+import torch.nn.functional as F
 from torch import nn
 import numpy as np
 
@@ -213,3 +214,108 @@ class LightGCN(BasicModel):
         inner_pro = torch.mul(users_emb, items_emb)
         gamma     = torch.sum(inner_pro, dim=1)
         return gamma
+
+class PCSRec(BasicModel):
+    def __init__(self, config, dataset):
+        super(PCSRec, self).__init__()
+        self.config = config
+        self.dataset = dataset
+        self.num_users = self.dataset.m_users
+        self.num_items = self.dataset.n_items
+        self.latent_dim = self.config['latent_dim_rec']
+        self.n_layers = self.config['lightGCN_n_layers']
+        
+        # 论文超参数
+        self.alpha = config['alpha']
+        
+        self.embedding_user = torch.nn.Embedding(num_embeddings=self.num_users, embedding_dim=self.latent_dim)
+        self.embedding_item = torch.nn.Embedding(num_embeddings=self.num_items, embedding_dim=self.latent_dim)
+        nn.init.normal_(self.embedding_user.weight, std=0.1)
+        nn.init.normal_(self.embedding_item.weight, std=0.1)
+        
+        # 路径编码可学习参数 theta (公式 1)
+        self.theta = nn.Parameter(torch.ones(6) / 6.0)
+
+        # 获取图结构
+        self.Graph_pos = self.dataset.Graph_pos.to(world.device)
+        self.Graph_neg = self.dataset.Graph_neg.to(world.device)
+        self.X_paths = [X.to(world.device) for X in self.dataset.X_paths]
+        
+    def _sparse_softmax_normalize(self, indices, values, num_nodes):
+        """实现公式(2) 行级稀疏 Softmax"""
+        exp_values = torch.exp(values)
+        row_indices = indices[0]
+        row_sums = torch.zeros(num_nodes, device=values.device)
+        row_sums.index_add_(0, row_indices, exp_values)
+        row_sums_gathered = row_sums[row_indices]
+        softmax_values = exp_values / (row_sums_gathered + 1e-8)
+        return torch.sparse_coo_tensor(indices, softmax_values, (num_nodes, num_nodes))
+
+    def computer(self):
+        """
+        前向传播计算最终 Embeddings
+        包含 PEE 和 PCF 模块
+        """
+        users_emb = self.embedding_user.weight
+        items_emb = self.embedding_item.weight
+        all_emb = torch.cat([users_emb, items_emb])
+        
+        num_nodes = all_emb.shape[0]
+
+        # =======================================================
+        # 1. Path-Enhanced Embedding (PEE) - 公式 (1) (2) (3)
+        # =======================================================
+        P_indices = None
+        P_values = None
+        
+        # 动态计算加权路径矩阵 P
+        for p in range(6):
+            indices = self.X_paths[p]._indices()
+            values = torch.ones_like(indices[0], dtype=torch.float32) * self.theta[p]
+            
+            if P_indices is None:
+                P_indices = indices
+                P_values = values
+            else:
+                # 拼接并合并重复索引
+                P_indices = torch.cat([P_indices, indices], dim=1)
+                P_values = torch.cat([P_values, values])
+                
+        # 合并重复索引的权重 (scatter add)
+        P_sparse = torch.sparse_coo_tensor(P_indices, P_values, (num_nodes, num_nodes)).coalesce()
+        
+        # 公式(2) 逐行 Softmax 归一化
+        P_matrix = self._sparse_softmax_normalize(P_sparse._indices(), P_sparse._values(), num_nodes)
+        
+        # 公式(3) 结构嵌入增强 E(0) <- P * E(0)
+        E_0 = torch.sparse.mm(P_matrix, all_emb)
+        embs = [E_0]
+
+        # =======================================================
+        # 2. Paired Channel Filtering (PCF) - 公式 (4) (5) (6)
+        # =======================================================
+        E_l = E_0
+        for layer in range(self.n_layers):
+            # 低通滤波 (正反馈通道) 公式 (4)
+            E_pos = torch.sparse.mm(self.Graph_pos, E_l)
+            
+            # 高通滤波 (负反馈通道) 公式 (5)
+            # L- = D - A- => 归一化后 E_neg = E_l - D^{-1/2} A- D^{-1/2} E_l
+            E_neg_A = torch.sparse.mm(self.Graph_neg, E_l)
+            E_neg = E_l - E_neg_A 
+            
+            # 反馈融合通道 公式 (6)
+            E_l = E_pos + self.alpha * E_neg
+            embs.append(E_l)
+            
+        embs = torch.stack(embs, dim=1)
+        light_out = torch.mean(embs, dim=1) # 均值聚合
+        users, items = torch.split(light_out, [self.num_users, self.num_items])
+        return users, items
+    
+    def getUsersRating(self, users):
+        all_users, all_items = self.computer()
+        users_emb = all_users[users.long()]
+        items_emb = all_items
+        rating = self.config['sigmoid'](torch.matmul(users_emb, items_emb.t()))
+        return rating
