@@ -72,10 +72,10 @@ def test_one_batch(X):
             'ndcg':np.array(ndcg)}
         
             
-def Test(dataset, Recmodel, epoch, w=None, multicore=0):
+def Test(dataset, Recmodel, epoch, w=None, multicore=0, evalDict=None, tag='Test'):
     u_batch_size = world.config['test_u_batch_size']
     dataset: utils.BasicDataset
-    testDict: dict = dataset.testDict
+    testDict: dict = evalDict if evalDict is not None else dataset.testDict
     Recmodel: model.LightGCN
     # eval mode with no dropout
     Recmodel = Recmodel.eval()
@@ -87,10 +87,12 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
                'ndcg': np.zeros(len(world.topks))}
     with torch.no_grad():
         users = list(testDict.keys())
-        try:
-            assert u_batch_size <= len(users) / 10
-        except AssertionError:
-            print(f"test_u_batch_size is too big for this dataset, try a small one {len(users) // 10}")
+        if len(users) == 0:
+            return results
+        safe_batch = max(1, len(users) // 10)
+        if u_batch_size > safe_batch:
+            print(f"adjust test_u_batch_size: {u_batch_size} -> {safe_batch}")
+            u_batch_size = safe_batch
         users_list = []
         rating_list = []
         groundTrue_list = []
@@ -99,6 +101,7 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
         total_batch = len(users) // u_batch_size + 1
         for batch_users in utils.minibatch(users, batch_size=u_batch_size):
             allPos = dataset.getUserPosItems(batch_users)
+            allNeg = dataset.getUserNegItems(batch_users) if hasattr(dataset, 'getUserNegItems') else None
             groundTrue = [testDict[u] for u in batch_users]
             batch_users_gpu = torch.Tensor(batch_users).long()
             batch_users_gpu = batch_users_gpu.to(world.device)
@@ -110,6 +113,10 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
             for range_i, items in enumerate(allPos):
                 exclude_index.extend([range_i] * len(items))
                 exclude_items.extend(items)
+            if allNeg is not None and world.model_name == 'pcsrec':
+                for range_i, items in enumerate(allNeg):
+                    exclude_index.extend([range_i] * len(items))
+                    exclude_items.extend(items)
             rating[exclude_index, exclude_items] = -(1<<10)
             _, rating_K = torch.topk(rating, k=max_K)
             rating = rating.cpu().numpy()
@@ -141,11 +148,11 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
         results['ndcg'] /= float(len(users))
         # results['auc'] = np.mean(auc_record)
         if world.tensorboard:
-            w.add_scalars(f'Test/Recall@{world.topks}',
+            w.add_scalars(f'{tag}/Recall@{world.topks}',
                           {str(world.topks[i]): results['recall'][i] for i in range(len(world.topks))}, epoch)
-            w.add_scalars(f'Test/Precision@{world.topks}',
+            w.add_scalars(f'{tag}/Precision@{world.topks}',
                           {str(world.topks[i]): results['precision'][i] for i in range(len(world.topks))}, epoch)
-            w.add_scalars(f'Test/NDCG@{world.topks}',
+            w.add_scalars(f'{tag}/NDCG@{world.topks}',
                           {str(world.topks[i]): results['ndcg'][i] for i in range(len(world.topks))}, epoch)
         if multicore == 1:
             pool.close()

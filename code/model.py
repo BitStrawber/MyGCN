@@ -244,6 +244,7 @@ class PCSRec(BasicModel):
         self.Graph_pos = self.Graph_pos.coalesce().to(world.device)
         self.Graph_neg = self.Graph_neg.coalesce().to(world.device)
         self.PathMats = [mat.coalesce().to(world.device) for mat in self.PathMats]
+        self.Graph_neg_lap = None
         
     def _sparse_softmax_normalize(self, indices, values, num_nodes):
         """实现公式(2) 行级稀疏 Softmax"""
@@ -293,16 +294,22 @@ class PCSRec(BasicModel):
         E_0 = torch.sparse.mm(P_matrix, all_emb)
         embs = [E_0]
 
+        if self.Graph_neg_lap is None:
+            eye_idx = torch.arange(num_nodes, device=world.device, dtype=torch.long)
+            eye_indices = torch.stack([eye_idx, eye_idx], dim=0)
+            eye_values = torch.ones(num_nodes, device=world.device, dtype=torch.float32)
+            eye = torch.sparse_coo_tensor(eye_indices, eye_values, (num_nodes, num_nodes)).coalesce()
+            self.Graph_neg_lap = (eye - self.Graph_neg).coalesce()
+
         E_l = E_0
         for _ in range(self.n_layers):
             E_pos = torch.sparse.mm(self.Graph_pos, E_l)
-            E_neg_A = torch.sparse.mm(self.Graph_neg, E_l)
-            E_neg = E_l - E_neg_A 
+            E_neg = torch.sparse.mm(self.Graph_neg_lap, E_l)
             E_l = E_pos + self.alpha * E_neg
             embs.append(E_l)
             
         embs = torch.stack(embs, dim=1)
-        light_out = torch.mean(embs, dim=1)
+        light_out = torch.sum(embs, dim=1)
         users, items = torch.split(light_out, [self.num_users, self.num_items])
         return users, items
     
@@ -332,13 +339,7 @@ class PCSRec(BasicModel):
 
         loss_bpr = bpr_pos + bpr_neg
 
-        def sim(e1, e2):
-            return F.cosine_similarity(e1, e2, dim=-1) / self.tau
-
-        P_u = torch.exp(sim(user_emb, pos_emb))
-        N_u = torch.exp(sim(user_emb, neg_emb))
-        
-        loss_contra = -torch.log(P_u / (P_u + N_u + 1e-12)).mean()
+        loss_contra = self._contrastive_loss(user_emb, all_items, users)
 
         user_emb_ego = self.embedding_user(users)
         pos_emb_ego = self.embedding_item(pos_items)
@@ -348,6 +349,27 @@ class PCSRec(BasicModel):
         total_loss = loss_bpr + self.gamma * loss_contra + self.decay * reg_loss
         
         return total_loss
+
+    def _contrastive_loss(self, user_emb, all_items, users):
+        losses = []
+        eps = 1e-12
+        users_np = users.detach().cpu().numpy().tolist()
+        for idx, user_id in enumerate(users_np):
+            pos_items = self.dataset.getUserPosItems([user_id])[0]
+            neg_items = self.dataset.getUserNegItems([user_id])[0]
+            if len(pos_items) == 0 or len(neg_items) == 0:
+                continue
+            u_emb = user_emb[idx:idx+1]
+            pos_emb = all_items[pos_items]
+            neg_emb = all_items[neg_items]
+            pos_sim = F.cosine_similarity(u_emb, pos_emb, dim=1) / self.tau
+            neg_sim = F.cosine_similarity(u_emb, neg_emb, dim=1) / self.tau
+            pos_sum = torch.exp(pos_sim).sum()
+            neg_sum = torch.exp(neg_sim).sum()
+            losses.append(-torch.log(pos_sum / (pos_sum + neg_sum + eps)))
+        if len(losses) == 0:
+            return torch.zeros((), device=user_emb.device)
+        return torch.stack(losses).mean()
 
     def bpr_loss(self, users, pos, neg):
         raise NotImplementedError("PCSRec 使用 calculate_loss 与双损失训练流程")

@@ -7,6 +7,7 @@ from tensorboardX import SummaryWriter
 import time
 import Procedure
 from os.path import join
+import os
 # ==============================
 utils.set_seed(world.seed)
 print(">>SEED:", world.seed)
@@ -21,6 +22,7 @@ if world.model_name != 'pcsrec':
     bpr = utils.BPRLoss(Recmodel, world.config)
 
 weight_file = utils.getFileName()
+best_weight_file = weight_file.replace('.pth.tar', '-best.pth.tar')
 print(f"load and save to {weight_file}")
 if world.LOAD:
     try:
@@ -40,11 +42,25 @@ else:
     world.cprint("not enable tensorflowboard")
 
 try:
+    best_ndcg = None
     for epoch in range(world.TRAIN_epochs):
         start = time.time()
         if epoch %10 == 0:
             cprint("[TEST]")
             Procedure.Test(dataset, Recmodel, epoch, w, world.config['multicore'])
+            if world.model_name == 'pcsrec' and hasattr(dataset, 'validDict') and len(dataset.validDict) > 0:
+                cprint("[VALID]")
+                valid_results = Procedure.Test(dataset,
+                                               Recmodel,
+                                               epoch,
+                                               w,
+                                               world.config['multicore'],
+                                               evalDict=dataset.validDict,
+                                               tag='Valid')
+                curr_ndcg = float(valid_results['ndcg'][-1]) if len(valid_results['ndcg']) > 0 else None
+                if curr_ndcg is not None and (best_ndcg is None or curr_ndcg > best_ndcg):
+                    best_ndcg = curr_ndcg
+                    torch.save(Recmodel.state_dict(), best_weight_file)
         if world.model_name == 'pcsrec':
             pcs_loss = Procedure.train_PCSRec(dataset, Recmodel, None, epoch, w=w)
             output_information = f"loss{pcs_loss:.3f}"
@@ -55,3 +71,8 @@ try:
 finally:
     if world.tensorboard:
         w.close()
+
+if world.model_name == 'pcsrec' and os.path.exists(best_weight_file):
+    Recmodel.load_state_dict(torch.load(best_weight_file, map_location=world.device))
+    cprint("[TEST-BEST]")
+    Procedure.Test(dataset, Recmodel, world.TRAIN_epochs, w=None, multicore=world.config['multicore'], tag='TestBest')

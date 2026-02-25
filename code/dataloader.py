@@ -231,11 +231,14 @@ class Loader(BasicDataset):
         self.n_user = 0
         self.m_item = 0
         train_file = path + '/train.txt'
+        valid_file = path + '/valid.txt'
         test_file = path + '/test.txt'
         self.path = path
         trainUniqueUsers, trainItem, trainUser = [], [], []
+        validUniqueUsers, validItem, validUser = [], [], []
         testUniqueUsers, testItem, testUser = [], [], []
         self.traindataSize = 0
+        self.validDataSize = 0
         self.testDataSize = 0
 
         with open(train_file) as f:
@@ -253,6 +256,23 @@ class Loader(BasicDataset):
         self.trainUniqueUsers = np.array(trainUniqueUsers)
         self.trainUser = np.array(trainUser)
         self.trainItem = np.array(trainItem)
+
+        if os.path.exists(valid_file):
+            with open(valid_file) as f:
+                for l in f.readlines():
+                    if len(l) > 0:
+                        l = l.strip('\n').split(' ')
+                        items = [int(i) for i in l[1:]]
+                        uid = int(l[0])
+                        validUniqueUsers.append(uid)
+                        validUser.extend([uid] * len(items))
+                        validItem.extend(items)
+                        self.m_item = max(self.m_item, max(items))
+                        self.n_user = max(self.n_user, uid)
+                        self.validDataSize += len(items)
+        self.validUniqueUsers = np.array(validUniqueUsers)
+        self.validUser = np.array(validUser)
+        self.validItem = np.array(validItem)
 
         with open(test_file) as f:
             for l in f.readlines():
@@ -274,8 +294,11 @@ class Loader(BasicDataset):
         
         self.Graph = None
         print(f"{self.trainDataSize} interactions for training")
+        if self.validDataSize > 0:
+            print(f"{self.validDataSize} interactions for validation")
         print(f"{self.testDataSize} interactions for testing")
-        print(f"{world.dataset} Sparsity : {(self.trainDataSize + self.testDataSize) / self.n_users / self.m_items}")
+        total_interactions = self.trainDataSize + self.validDataSize + self.testDataSize
+        print(f"{world.dataset} Sparsity : {total_interactions / self.n_users / self.m_items}")
 
         # (users,items), bipartite graph
         self.UserItemNet = csr_matrix((np.ones(len(self.trainUser)), (self.trainUser, self.trainItem)),
@@ -297,6 +320,7 @@ class Loader(BasicDataset):
         if not hasattr(self, 'signed_train_users'):
             self.signed_train_users = self.trainUniqueUsers
         self.__testDict = self.__build_test()
+        self.__validDict = self.__build_valid()
         print(f"{world.dataset} is ready to go")
 
     @property
@@ -314,6 +338,10 @@ class Loader(BasicDataset):
     @property
     def testDict(self):
         return self.__testDict
+
+    @property
+    def validDict(self):
+        return self.__validDict
 
     @property
     def allPos(self):
@@ -486,6 +514,22 @@ class Loader(BasicDataset):
             else:
                 test_data[user] = [item]
         return test_data
+
+    def __build_valid(self):
+        """
+        return:
+            dict: {user: [items]}
+        """
+        valid_data = {}
+        if self.validDataSize == 0:
+            return valid_data
+        for i, item in enumerate(self.validItem):
+            user = self.validUser[i]
+            if valid_data.get(user):
+                valid_data[user].append(item)
+            else:
+                valid_data[user] = [item]
+        return valid_data
 
     def getUserItemFeedback(self, users, items):
         """

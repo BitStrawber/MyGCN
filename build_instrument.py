@@ -35,8 +35,8 @@ with gzip.open(file_path, 'rb') as f:
     for line in f:
         data.append(json.loads(line))
 
-df = pd.DataFrame(data)[['reviewerID', 'asin', 'overall']]
-df.columns = ['user', 'item', 'rating']
+df = pd.DataFrame(data)[['reviewerID', 'asin', 'overall', 'unixReviewTime']]
+df.columns = ['user', 'item', 'rating', 'timestamp']
 
 # 优化4: 使用 pd.factorize 高效进行从0开始的连续ID映射
 df['user_id'], user_index = pd.factorize(df['user'])
@@ -44,9 +44,8 @@ df['item_id'], item_index = pd.factorize(df['item'])
 
 print(f"Stats -> Users: {len(user_index)}, Items: {len(item_index)}, Total Interactions: {len(df)}")
 
-# 区分正负反馈: >=4 为正，<=2 为负，(2,4) 视为中性并丢弃
-df['sign'] = np.where(df['rating'] >= 4.0, 1, np.where(df['rating'] <= 2.0, -1, 0))
-df = df[df['sign'] != 0].copy()
+# 论文口径：rating >= 4 为正反馈，rating < 4 为负反馈
+df['sign'] = np.where(df['rating'] >= 4.0, 1, -1)
 df_pos = df[df['sign'] == 1].copy()
 df_neg = df[df['sign'] == -1].copy()
 
@@ -55,29 +54,39 @@ print(f"Positive Edges: {len(df_pos)}, Negative Edges: {len(df_neg)}")
 
 # ================= 优化1 & 3: 按用户分组进行 7:1:2 划分 =================
 def split_by_user(data_df):
-    """按用户切分为 train/test（8:2），保证每个用户至少有一个 train 正样本。"""
-    data_df = data_df.sample(frac=1, random_state=42).reset_index(drop=True)
+    """按时间切分 7:1:2（train/valid/test）。"""
+    data_df = data_df.sort_values(['user_id', 'timestamp']).reset_index(drop=True)
 
-    train_list, test_list = [], []
+    train_list, valid_list, test_list = [], [], []
 
     for _, group in data_df.groupby('user_id'):
         n = len(group)
-        if n >= 2:
-            test_n = max(1, int(n * 0.2))
-            train_n = max(1, n - test_n)
+        if n >= 3:
+            train_n = max(1, int(n * 0.7))
+            valid_n = max(1, int(n * 0.1))
+            if train_n + valid_n >= n:
+                valid_n = 1
+                train_n = n - valid_n - 1
+            test_n = n - train_n - valid_n
             train_list.append(group.iloc[:train_n])
-            test_list.append(group.iloc[train_n:])
+            valid_list.append(group.iloc[train_n:train_n + valid_n])
+            test_list.append(group.iloc[train_n + valid_n:])
+        elif n == 2:
+            train_list.append(group.iloc[:1])
+            test_list.append(group.iloc[1:])
         else:
             train_list.append(group)
 
     train_df = pd.concat(train_list) if train_list else pd.DataFrame(columns=data_df.columns)
+    valid_df = pd.concat(valid_list) if valid_list else pd.DataFrame(columns=data_df.columns)
     test_df = pd.concat(test_list) if test_list else pd.DataFrame(columns=data_df.columns)
-    return train_df, test_df
+    return train_df, valid_df, test_df
 
 
 print("Splitting positive edges...")
-train_pos, test_pos = split_by_user(df_pos)
-train_neg = df_neg.copy()
+train_pos, valid_pos, test_pos = split_by_user(df_pos)
+print("Splitting negative edges...")
+train_neg, valid_neg, test_neg = split_by_user(df_neg)
 
 
 # ================= 文件写入 =================
@@ -125,6 +134,7 @@ def build_signed_summary(train_pos_df, train_neg_df):
 print(f"Writing files to {out_dir}...")
 # LightGCN / PCSRec 读取的标准文件
 write_grouped_txt(train_pos, os.path.join(out_dir, "train.txt"))
+write_grouped_txt(valid_pos, os.path.join(out_dir, "valid.txt"))
 write_grouped_txt(test_pos, os.path.join(out_dir, "test.txt"))
 write_signed_triplet(train_pos, train_neg, os.path.join(out_dir, "train_signed.txt"))
 
@@ -134,5 +144,7 @@ write_mapping(os.path.join(out_dir, "item_list.txt"), item_index)
 
 users_with_pos_and_neg = build_signed_summary(train_pos, train_neg)
 print("All Done! Preprocessing complete.")
-print(f"Files generated: train.txt, test.txt, train_signed.txt, user_list.txt, item_list.txt")
+print(f"Files generated: train.txt, valid.txt, test.txt, train_signed.txt, user_list.txt, item_list.txt")
 print(f"Users with both positive and negative train edges: {users_with_pos_and_neg}")
+print(f"Train/Valid/Test positive edges: {len(train_pos)}/{len(valid_pos)}/{len(test_pos)}")
+print(f"Train/Valid/Test negative edges: {len(train_neg)}/{len(valid_neg)}/{len(test_neg)}")
