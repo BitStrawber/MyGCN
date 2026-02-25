@@ -16,7 +16,9 @@ from register import dataset
 
 Recmodel = register.MODELS[world.model_name](world.config, dataset)
 Recmodel = Recmodel.to(world.device)
-bpr = utils.BPRLoss(Recmodel, world.config)
+bpr = None
+if world.model_name != 'pcsrec':
+    bpr = utils.BPRLoss(Recmodel, world.config)
 
 weight_file = utils.getFileName()
 print(f"load and save to {weight_file}")
@@ -43,7 +45,11 @@ try:
         if epoch %10 == 0:
             cprint("[TEST]")
             Procedure.Test(dataset, Recmodel, epoch, w, world.config['multicore'])
-        output_information = Procedure.BPR_train_original(dataset, Recmodel, bpr, epoch, neg_k=Neg_k,w=w)
+        if world.model_name == 'pcsrec':
+            pcs_loss = Procedure.train_PCSRec(dataset, Recmodel, None, epoch, w=w)
+            output_information = f"loss{pcs_loss:.3f}"
+        else:
+            output_information = Procedure.BPR_train_original(dataset, Recmodel, bpr, epoch, neg_k=Neg_k,w=w)
         print(f'EPOCH[{epoch+1}/{world.TRAIN_epochs}] {output_information}')
         torch.save(Recmodel.state_dict(), weight_file)
 finally:

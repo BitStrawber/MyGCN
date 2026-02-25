@@ -154,10 +154,10 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0):
 
 def train_PCSRec(dataset, recommend_model, loss_class, epoch, w=None):
     recommend_model.train()
-    
-    # 假设你已经写了一个新的 sampler 能够返回: user, pos_i, neg_i, unobs_pos, unobs_neg
-    # 注意：你需要改造原版 utils.py 中的 UniformSample_original 函数来适配符号图
+
     S = utils.Signed_UniformSample_original(dataset)
+    if S.size == 0:
+        return 0.0
     users = torch.Tensor(S[:, 0]).long().to(world.device)
     posItems = torch.Tensor(S[:, 1]).long().to(world.device)
     negItems = torch.Tensor(S[:, 2]).long().to(world.device)
@@ -178,6 +178,8 @@ def train_PCSRec(dataset, recommend_model, loss_class, epoch, w=None):
         recommend_model.optimizer.step()
         
         aver_loss += loss.item()
+        if world.tensorboard and w is not None:
+            w.add_scalar('PCSRec/Loss', loss.item(), epoch * total_batch + batch_i)
 
     aver_loss = aver_loss / total_batch
     return aver_loss

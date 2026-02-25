@@ -110,7 +110,52 @@ def getFileName():
         file = f"mf-{world.dataset}-{world.config['latent_dim_rec']}.pth.tar"
     elif world.model_name == 'lgn':
         file = f"lgn-{world.dataset}-{world.config['lightGCN_n_layers']}-{world.config['latent_dim_rec']}.pth.tar"
+    elif world.model_name == 'pcsrec':
+        file = f"pcsrec-{world.dataset}-{world.config['lightGCN_n_layers']}-{world.config['latent_dim_rec']}.pth.tar"
     return os.path.join(world.FILE_PATH,file)
+
+
+def Signed_UniformSample_original(dataset):
+    dataset: BasicDataset
+    users = getattr(dataset, 'signed_train_users', None)
+    if users is None or len(users) == 0:
+        users = np.arange(dataset.n_users)
+    user_num = max(dataset.trainDataSize, len(users))
+    sampled_users = np.random.choice(users, size=user_num, replace=True)
+
+    all_pos = dataset.allPos
+    all_neg = dataset.getUserNegItems(list(range(dataset.n_users)))
+    all_items = np.arange(dataset.m_items)
+    S = []
+    for user in sampled_users:
+        pos_items = all_pos[user]
+        if len(pos_items) == 0:
+            continue
+        neg_items = all_neg[user]
+
+        pos_item = pos_items[np.random.randint(0, len(pos_items))]
+        if len(neg_items) > 0:
+            neg_item = neg_items[np.random.randint(0, len(neg_items))]
+        else:
+            neg_item = np.random.randint(0, dataset.m_items)
+
+        forbidden = set(pos_items.tolist())
+        if len(neg_items) > 0:
+            forbidden.update(neg_items.tolist())
+        if len(forbidden) >= dataset.m_items:
+            continue
+
+        unobs_pos = np.random.randint(0, dataset.m_items)
+        while unobs_pos in forbidden:
+            unobs_pos = np.random.randint(0, dataset.m_items)
+
+        unobs_neg = np.random.randint(0, dataset.m_items)
+        while unobs_neg in forbidden:
+            unobs_neg = np.random.randint(0, dataset.m_items)
+
+        S.append([user, pos_item, neg_item, unobs_pos, unobs_neg])
+
+    return np.array(S, dtype=np.int64)
 
 def minibatch(*tensors, **kwargs):
 

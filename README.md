@@ -76,6 +76,26 @@ BPR[sample time][16.9=16.60+0.45]
 * If you want to run your own models on the datasets we offer, you should go to `model.py`, and implement a model inherited from `BasicModel`.  Then register it in `register.py`.
 * If you want to run your own sampling methods on the datasets and models we offer, you should go to `Procedure.py`, and implement a function. Then modify the corresponding code in `main.py`
 
+## PCSRec Reproduction
+
+This repo now supports `pcsrec` with signed feedback.
+
+### 1) Build signed dataset files
+
+Required files under `data/<dataset_name>/`:
+
+- `train.txt` (positive train interactions in LightGCN format: `user item1 item2 ...`)
+- `test.txt` (positive test interactions in LightGCN format)
+- `train_signed.txt` (triplet format: `user item sign`, where sign is `1` or `-1`)
+
+You can preprocess raw rating logs with:
+
+`cd code && python preprocess_pcsrec.py --input <raw.csv> --output_dir ../data/<dataset_name> --user_col user --item_col item --rating_col rating --pos_thres 4 --neg_thres 2 --test_ratio 0.2`
+
+### 2) Train PCSRec
+
+`cd code && python main.py --dataset="yelp_pcsrec" --model="pcsrec" --alpha=0.5 --beta=1.0 --gamma=0.01 --tau=0.2 --bpr_batch=2048 --recdim=64 --layer=3 --lr=0.001 --decay=1e-4 --topks="[10,20]" --tensorboard=1`
+
 
 ## Results
 *all metrics is under top-20*

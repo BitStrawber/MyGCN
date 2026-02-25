@@ -286,7 +286,14 @@ class Loader(BasicDataset):
         self.items_D[self.items_D == 0.] = 1.
         # pre-calculate
         self._allPos = self.getUserPosItems(list(range(self.n_user)))
+        self._allNeg = [np.array([], dtype=np.int64) for _ in range(self.n_user)]
+        self.signed_train_users = self.trainUniqueUsers
         self.__testDict = self.__build_test()
+
+        self.Graph_pos = None
+        self.Graph_neg = None
+        self.PathMats = None
+        self._init_signed_feedback_if_needed()
         print(f"{world.dataset} is ready to go")
 
     @property
@@ -321,59 +328,99 @@ class Loader(BasicDataset):
             A_fold.append(self._convert_sp_mat_to_sp_tensor(A[start:end]).coalesce().to(world.device))
         return A_fold
 
-    def build_signed_graphs(self):
-        """
-        假设 self.train_pos_UserItemNet 和 self.train_neg_UserItemNet 已经是 
-        scipy.sparse.csr_matrix 格式的邻接矩阵（大小为 user_num x item_num）。
-        需要构建全图 |V|x|V| 的对称拉普拉斯矩阵。
-        """
-        # 1. 构建全图的正负邻接矩阵 (A+ 和 A-)
-        def build_symmetric_adj(R):
-            adj_mat = sp.dok_matrix((self.m_users + self.n_items, self.m_users + self.n_items), dtype=np.float32)
-            adj_mat = adj_mat.tolil()
-            R = R.tolil()
-            adj_mat[:self.m_users, self.m_users:] = R
-            adj_mat[self.m_users:, :self.m_users] = R.T
-            adj_mat = adj_mat.tocsr()
-            return adj_mat
+    def _init_signed_feedback_if_needed(self):
+        self.posUserItemNet = self.UserItemNet.copy().astype(np.float32)
+        self.negUserItemNet = csr_matrix((self.n_user, self.m_item), dtype=np.float32)
+        if not self.split and world.model_name != 'pcsrec':
+            return
+        self._load_signed_feedback()
 
-        A_pos = build_symmetric_adj(self.train_pos_UserItemNet)
-        A_neg = build_symmetric_adj(self.train_neg_UserItemNet)
+    def _load_signed_feedback(self):
+        triplet_file = join(self.path, 'train_signed.txt')
+        if not os.path.exists(triplet_file):
+            return
 
-        # 2. 计算规范化的拉普拉斯卷积核 (D^{-1/2} A D^{-1/2})
-        def normalize_adj(adj):
-            rowsum = np.array(adj.sum(1))
-            d_inv = np.power(rowsum, -0.5).flatten()
-            d_inv[np.isinf(d_inv)] = 0.
-            d_mat_inv = sp.diags(d_inv)
-            norm_adj = d_mat_inv.dot(adj).dot(d_mat_inv)
-            return self._convert_sp_mat_to_sp_tensor(norm_adj) # LightGCN自带的转换函数
+        pos_u, pos_i, neg_u, neg_i = [], [], [], []
+        with open(triplet_file, 'r', encoding='utf-8') as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 3:
+                    continue
+                u, i, s = int(parts[0]), int(parts[1]), int(parts[2])
+                if u >= self.n_user or i >= self.m_item:
+                    continue
+                if s > 0:
+                    pos_u.append(u)
+                    pos_i.append(i)
+                elif s < 0:
+                    neg_u.append(u)
+                    neg_i.append(i)
 
-        self.Graph_pos = normalize_adj(A_pos)
-        self.Graph_neg = normalize_adj(A_neg) # 注意：这里的 Graph_neg 是归一化后的 A^-
+        if len(pos_u) > 0:
+            self.posUserItemNet = csr_matrix((np.ones(len(pos_u), dtype=np.float32), (np.array(pos_u), np.array(pos_i))),
+                                             shape=(self.n_user, self.m_item))
+        if len(neg_u) > 0:
+            self.negUserItemNet = csr_matrix((np.ones(len(neg_u), dtype=np.float32), (np.array(neg_u), np.array(neg_i))),
+                                             shape=(self.n_user, self.m_item))
 
-        # 3. 为 PEE 模块构建 6 种二值化路径矩阵
-        # 由于全图乘法极其耗时且消耗内存，建议在 GPU 上使用 torch.sparse.mm
-        device = world.device
-        A_pos_t = self._convert_sp_mat_to_sp_tensor(A_pos).to(device)
-        A_neg_t = self._convert_sp_mat_to_sp_tensor(A_neg).to(device)
+        self._allPos = [self.posUserItemNet[u].nonzero()[1] for u in range(self.n_user)]
+        self._allNeg = [self.negUserItemNet[u].nonzero()[1] for u in range(self.n_user)]
+        self.signed_train_users = np.array(
+            [u for u in range(self.n_user) if len(self._allPos[u]) > 0 and len(self._allNeg[u]) > 0],
+            dtype=np.int64
+        )
+        if len(self.signed_train_users) == 0:
+            self.signed_train_users = np.array(
+                [u for u in range(self.n_user) if len(self._allPos[u]) > 0],
+                dtype=np.int64
+            )
 
-        def binarize_sparse_tensor(sp_tensor):
-            indices = sp_tensor._indices()
-            # 提取非零元素位置，设权重为 1
-            return torch.sparse_coo_tensor(indices, torch.ones_like(sp_tensor._values()), sp_tensor.shape).coalesce()
+    def _build_bipartite_adj(self, user_item_mat):
+        adj_mat = sp.dok_matrix((self.n_users + self.m_items, self.n_users + self.m_items), dtype=np.float32)
+        adj_mat = adj_mat.tolil()
+        R = user_item_mat.tolil()
+        adj_mat[:self.n_users, self.n_users:] = R
+        adj_mat[self.n_users:, :self.n_users] = R.T
+        return adj_mat.tocsr()
 
-        # 1-hop
-        X1 = binarize_sparse_tensor(A_pos_t)
-        X2 = binarize_sparse_tensor(A_neg_t)
-        
-        # 2-hop (矩阵相乘然后二值化)
-        X3 = binarize_sparse_tensor(torch.sparse.mm(A_pos_t, A_pos_t.to_dense()).to_sparse()) # 简化运算，实际可根据图大小优化
-        X4 = binarize_sparse_tensor(torch.sparse.mm(A_pos_t, A_neg_t.to_dense()).to_sparse())
-        X5 = binarize_sparse_tensor(torch.sparse.mm(A_neg_t, A_pos_t.to_dense()).to_sparse())
-        X6 = binarize_sparse_tensor(torch.sparse.mm(A_neg_t, A_neg_t.to_dense()).to_sparse())
+    def _normalize_adj(self, adj):
+        rowsum = np.array(adj.sum(axis=1)).flatten()
+        d_inv = np.power(rowsum, -0.5)
+        d_inv[np.isinf(d_inv)] = 0.
+        d_mat = sp.diags(d_inv)
+        return d_mat.dot(adj).dot(d_mat).tocsr()
 
-        self.X_paths = [X1, X2, X3, X4, X5, X6]
+    def _binarize_adj(self, adj):
+        bin_adj = adj.copy().tocsr()
+        bin_adj.data = np.ones_like(bin_adj.data, dtype=np.float32)
+        bin_adj.eliminate_zeros()
+        return bin_adj
+
+    def getSignedGraphComponents(self):
+        if self.Graph_pos is not None and self.Graph_neg is not None and self.PathMats is not None:
+            return self.Graph_pos, self.Graph_neg, self.PathMats
+
+        pos_adj = self._build_bipartite_adj(self.posUserItemNet)
+        neg_adj = self._build_bipartite_adj(self.negUserItemNet)
+
+        self.Graph_pos = self._convert_sp_mat_to_sp_tensor(self._normalize_adj(pos_adj)).coalesce().to(world.device)
+        self.Graph_neg = self._convert_sp_mat_to_sp_tensor(self._normalize_adj(neg_adj)).coalesce().to(world.device)
+
+        x1 = self._binarize_adj(pos_adj)
+        x2 = self._binarize_adj(neg_adj)
+        x3 = self._binarize_adj(pos_adj.dot(pos_adj))
+        x4 = self._binarize_adj(pos_adj.dot(neg_adj))
+        x5 = self._binarize_adj(neg_adj.dot(pos_adj))
+        x6 = self._binarize_adj(neg_adj.dot(neg_adj))
+        self.PathMats = [
+            self._convert_sp_mat_to_sp_tensor(x1).coalesce().to(world.device),
+            self._convert_sp_mat_to_sp_tensor(x2).coalesce().to(world.device),
+            self._convert_sp_mat_to_sp_tensor(x3).coalesce().to(world.device),
+            self._convert_sp_mat_to_sp_tensor(x4).coalesce().to(world.device),
+            self._convert_sp_mat_to_sp_tensor(x5).coalesce().to(world.device),
+            self._convert_sp_mat_to_sp_tensor(x6).coalesce().to(world.device),
+        ]
+        return self.Graph_pos, self.Graph_neg, self.PathMats
 
     def _convert_sp_mat_to_sp_tensor(self, X):
         coo = X.tocoo().astype(np.float32)
@@ -451,11 +498,11 @@ class Loader(BasicDataset):
     def getUserPosItems(self, users):
         posItems = []
         for user in users:
-            posItems.append(self.UserItemNet[user].nonzero()[1])
+            posItems.append(self.posUserItemNet[user].nonzero()[1])
         return posItems
 
-    # def getUserNegItems(self, users):
-    #     negItems = []
-    #     for user in users:
-    #         negItems.append(self.allNeg[user])
-    #     return negItems
+    def getUserNegItems(self, users):
+        negItems = []
+        for user in users:
+            negItems.append(self._allNeg[user])
+        return negItems
