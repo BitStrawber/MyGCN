@@ -147,7 +147,7 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0, evalDict=None, tag='Test
         results['precision'] /= float(len(users))
         results['ndcg'] /= float(len(users))
         # results['auc'] = np.mean(auc_record)
-        if world.tensorboard:
+        if world.tensorboard and w is not None:
             w.add_scalars(f'{tag}/Recall@{world.topks}',
                           {str(world.topks[i]): results['recall'][i] for i in range(len(world.topks))}, epoch)
             w.add_scalars(f'{tag}/Precision@{world.topks}',
