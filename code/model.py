@@ -87,7 +87,7 @@ class LightGCN(BasicModel):
                  dataset:BasicDataset):
         super(LightGCN, self).__init__()
         self.config = config
-        self.dataset : dataloader.BasicDataset = dataset
+        self.dataset: BasicDataset = dataset
         self.__init_weight()
 
     def __init_weight(self):
@@ -220,26 +220,30 @@ class PCSRec(BasicModel):
         super(PCSRec, self).__init__()
         self.config = config
         self.dataset = dataset
-        self.num_users = self.dataset.m_users
-        self.num_items = self.dataset.n_items
+        self.num_users = self.dataset.n_users
+        self.num_items = self.dataset.m_items
         self.latent_dim = self.config['latent_dim_rec']
         self.n_layers = self.config['lightGCN_n_layers']
-        
-        # 论文超参数
         self.alpha = config['alpha']
+        self.beta = config['beta']
+        self.gamma = config['gamma']
+        self.tau = config['tau']
+        self.decay = config['decay']
+        self.lr = config['lr']
         
         self.embedding_user = torch.nn.Embedding(num_embeddings=self.num_users, embedding_dim=self.latent_dim)
         self.embedding_item = torch.nn.Embedding(num_embeddings=self.num_items, embedding_dim=self.latent_dim)
         nn.init.normal_(self.embedding_user.weight, std=0.1)
         nn.init.normal_(self.embedding_item.weight, std=0.1)
-        
-        # 路径编码可学习参数 theta (公式 1)
-        self.theta = nn.Parameter(torch.ones(6) / 6.0)
 
-        # 获取图结构
-        self.Graph_pos = self.dataset.Graph_pos.to(world.device)
-        self.Graph_neg = self.dataset.Graph_neg.to(world.device)
-        self.X_paths = [X.to(world.device) for X in self.dataset.X_paths]
+        self.theta = nn.Parameter(torch.ones(6) / 6.0)
+        self.f = nn.Sigmoid()
+        self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
+
+        self.Graph_pos, self.Graph_neg, self.PathMats = self.dataset.getSignedGraphComponents()
+        self.Graph_pos = self.Graph_pos.coalesce().to(world.device)
+        self.Graph_neg = self.Graph_neg.coalesce().to(world.device)
+        self.PathMats = [mat.coalesce().to(world.device) for mat in self.PathMats]
         
     def _sparse_softmax_normalize(self, indices, values, num_nodes):
         """实现公式(2) 行级稀疏 Softmax"""
@@ -248,8 +252,36 @@ class PCSRec(BasicModel):
         row_sums = torch.zeros(num_nodes, device=values.device)
         row_sums.index_add_(0, row_indices, exp_values)
         row_sums_gathered = row_sums[row_indices]
-        softmax_values = exp_values / (row_sums_gathered + 1e-8)
-        return torch.sparse_coo_tensor(indices, softmax_values, (num_nodes, num_nodes))
+        softmax_values = exp_values / (row_sums_gathered + 1e-12)
+        return torch.sparse_coo_tensor(indices, softmax_values, (num_nodes, num_nodes)).coalesce()
+
+    def _build_path_weighted_matrix(self, num_nodes):
+        theta_weight = torch.softmax(self.theta, dim=0)
+        all_indices = []
+        all_values = []
+        for path_id, path_mat in enumerate(self.PathMats):
+            path_mat = path_mat.coalesce()
+            indices = path_mat.indices()
+            if indices.shape[1] == 0:
+                continue
+            values = torch.full(
+                (indices.shape[1],),
+                theta_weight[path_id],
+                device=indices.device,
+                dtype=torch.float32
+            )
+            all_indices.append(indices)
+            all_values.append(values)
+        if len(all_indices) == 0:
+            eye_idx = torch.arange(num_nodes, device=world.device, dtype=torch.long)
+            indices = torch.stack([eye_idx, eye_idx], dim=0)
+            values = torch.ones(num_nodes, device=world.device, dtype=torch.float32)
+            return torch.sparse_coo_tensor(indices, values, (num_nodes, num_nodes)).coalesce()
+
+        cat_indices = torch.cat(all_indices, dim=1)
+        cat_values = torch.cat(all_values, dim=0)
+        weighted = torch.sparse_coo_tensor(cat_indices, cat_values, (num_nodes, num_nodes)).coalesce()
+        return self._sparse_softmax_normalize(weighted.indices(), weighted.values(), num_nodes)
 
     def computer(self):
         """
@@ -262,54 +294,20 @@ class PCSRec(BasicModel):
         
         num_nodes = all_emb.shape[0]
 
-        # =======================================================
-        # 1. Path-Enhanced Embedding (PEE) - 公式 (1) (2) (3)
-        # =======================================================
-        P_indices = None
-        P_values = None
-        
-        # 动态计算加权路径矩阵 P
-        for p in range(6):
-            indices = self.X_paths[p]._indices()
-            values = torch.ones_like(indices[0], dtype=torch.float32) * self.theta[p]
-            
-            if P_indices is None:
-                P_indices = indices
-                P_values = values
-            else:
-                # 拼接并合并重复索引
-                P_indices = torch.cat([P_indices, indices], dim=1)
-                P_values = torch.cat([P_values, values])
-                
-        # 合并重复索引的权重 (scatter add)
-        P_sparse = torch.sparse_coo_tensor(P_indices, P_values, (num_nodes, num_nodes)).coalesce()
-        
-        # 公式(2) 逐行 Softmax 归一化
-        P_matrix = self._sparse_softmax_normalize(P_sparse._indices(), P_sparse._values(), num_nodes)
-        
-        # 公式(3) 结构嵌入增强 E(0) <- P * E(0)
+        P_matrix = self._build_path_weighted_matrix(num_nodes)
         E_0 = torch.sparse.mm(P_matrix, all_emb)
         embs = [E_0]
 
-        # =======================================================
-        # 2. Paired Channel Filtering (PCF) - 公式 (4) (5) (6)
-        # =======================================================
         E_l = E_0
-        for layer in range(self.n_layers):
-            # 低通滤波 (正反馈通道) 公式 (4)
+        for _ in range(self.n_layers):
             E_pos = torch.sparse.mm(self.Graph_pos, E_l)
-            
-            # 高通滤波 (负反馈通道) 公式 (5)
-            # L- = D - A- => 归一化后 E_neg = E_l - D^{-1/2} A- D^{-1/2} E_l
             E_neg_A = torch.sparse.mm(self.Graph_neg, E_l)
             E_neg = E_l - E_neg_A 
-            
-            # 反馈融合通道 公式 (6)
             E_l = E_pos + self.alpha * E_neg
             embs.append(E_l)
             
         embs = torch.stack(embs, dim=1)
-        light_out = torch.mean(embs, dim=1) # 均值聚合
+        light_out = torch.mean(embs, dim=1)
         users, items = torch.split(light_out, [self.num_users, self.num_items])
         return users, items
     
@@ -317,45 +315,44 @@ class PCSRec(BasicModel):
         all_users, all_items = self.computer()
         users_emb = all_users[users.long()]
         items_emb = all_items
-        rating = self.config['sigmoid'](torch.matmul(users_emb, items_emb.t()))
+        rating = self.f(torch.matmul(users_emb, items_emb.t()))
         return rating
 
     def calculate_loss(self, users, pos_items, neg_items, unobs_pos, unobs_neg):
         all_users, all_items = self.computer()
-
+        
         user_emb = all_users[users]
         pos_emb = all_items[pos_items]
         neg_emb = all_items[neg_items]
         unobs_pos_emb = all_items[unobs_pos]
         unobs_neg_emb = all_items[unobs_neg]
 
-        # 1. 双向 BPR Loss (公式 11)
-        # 预测打分
-        score_pos = torch.sum(user_emb * pos_emb, dim=1)
-        score_unobs_pos = torch.sum(user_emb * unobs_pos_emb, dim=1)
-        score_neg = torch.sum(user_emb * neg_emb, dim=1)
-        score_unobs_neg = torch.sum(user_emb * unobs_neg_emb, dim=1)
+        pos_scores = torch.mul(user_emb, pos_emb).sum(dim=1)
+        unobs_pos_scores = torch.mul(user_emb, unobs_pos_emb).sum(dim=1)
+        bpr_pos = F.softplus(unobs_pos_scores - pos_scores).mean()
 
-        # 正反馈：拉近喜欢的物品，推开未观测物品
-        bpr_pos = -torch.log(torch.sigmoid(score_pos - score_unobs_pos) + 1e-8).mean()
-
-        # 负反馈：推开讨厌的物品，确保未观测物品打分更高
-        bpr_neg = -torch.log(torch.sigmoid(self.beta * (score_unobs_neg - score_neg)) + 1e-8).mean()
+        neg_scores = torch.mul(user_emb, neg_emb).sum(dim=1)
+        unobs_neg_scores = torch.mul(user_emb, unobs_neg_emb).sum(dim=1)
+        bpr_neg = F.softplus(self.beta * (neg_scores - unobs_neg_scores)).mean()
 
         loss_bpr = bpr_pos + bpr_neg
 
-        # 2. Contrastive Loss (公式 7, 8, 9)
         def sim(e1, e2):
             return F.cosine_similarity(e1, e2, dim=-1) / self.tau
 
         P_u = torch.exp(sim(user_emb, pos_emb))
         N_u = torch.exp(sim(user_emb, neg_emb))
-        loss_contra = -torch.log(P_u / (P_u + N_u + 1e-8)).mean()
+        
+        loss_contra = -torch.log(P_u / (P_u + N_u + 1e-12)).mean()
 
-        # 3. L2 正则化 (防止过拟合)
-        reg_loss = (1 / 2) * (self.embedding_user.weight[users].norm(2).pow(2) +
-                              self.embedding_item.weight[pos_items].norm(2).pow(2) +
-                              self.embedding_item.weight[neg_items].norm(2).pow(2)) / float(len(users))
-
-        total_loss = loss_bpr + self.gamma * loss_contra + self.config['decay'] * reg_loss
+        user_emb_ego = self.embedding_user(users)
+        pos_emb_ego = self.embedding_item(pos_items)
+        neg_emb_ego = self.embedding_item(neg_items)
+        reg_loss = (1/2)*(user_emb_ego.norm(2).pow(2) + pos_emb_ego.norm(2).pow(2) + neg_emb_ego.norm(2).pow(2))/float(len(users))
+        
+        total_loss = loss_bpr + self.gamma * loss_contra + self.decay * reg_loss
+        
         return total_loss
+
+    def bpr_loss(self, users, pos, neg):
+        raise NotImplementedError("PCSRec 使用 calculate_loss 与双损失训练流程")
