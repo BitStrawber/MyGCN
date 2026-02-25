@@ -319,3 +319,43 @@ class PCSRec(BasicModel):
         items_emb = all_items
         rating = self.config['sigmoid'](torch.matmul(users_emb, items_emb.t()))
         return rating
+
+    def calculate_loss(self, users, pos_items, neg_items, unobs_pos, unobs_neg):
+        all_users, all_items = self.computer()
+
+        user_emb = all_users[users]
+        pos_emb = all_items[pos_items]
+        neg_emb = all_items[neg_items]
+        unobs_pos_emb = all_items[unobs_pos]
+        unobs_neg_emb = all_items[unobs_neg]
+
+        # 1. 双向 BPR Loss (公式 11)
+        # 预测打分
+        score_pos = torch.sum(user_emb * pos_emb, dim=1)
+        score_unobs_pos = torch.sum(user_emb * unobs_pos_emb, dim=1)
+        score_neg = torch.sum(user_emb * neg_emb, dim=1)
+        score_unobs_neg = torch.sum(user_emb * unobs_neg_emb, dim=1)
+
+        # 正反馈：拉近喜欢的物品，推开未观测物品
+        bpr_pos = -torch.log(torch.sigmoid(score_pos - score_unobs_pos) + 1e-8).mean()
+
+        # 负反馈：推开讨厌的物品，确保未观测物品打分更高
+        bpr_neg = -torch.log(torch.sigmoid(self.beta * (score_unobs_neg - score_neg)) + 1e-8).mean()
+
+        loss_bpr = bpr_pos + bpr_neg
+
+        # 2. Contrastive Loss (公式 7, 8, 9)
+        def sim(e1, e2):
+            return F.cosine_similarity(e1, e2, dim=-1) / self.tau
+
+        P_u = torch.exp(sim(user_emb, pos_emb))
+        N_u = torch.exp(sim(user_emb, neg_emb))
+        loss_contra = -torch.log(P_u / (P_u + N_u + 1e-8)).mean()
+
+        # 3. L2 正则化 (防止过拟合)
+        reg_loss = (1 / 2) * (self.embedding_user.weight[users].norm(2).pow(2) +
+                              self.embedding_item.weight[pos_items].norm(2).pow(2) +
+                              self.embedding_item.weight[neg_items].norm(2).pow(2)) / float(len(users))
+
+        total_loss = loss_bpr + self.gamma * loss_contra + self.config['decay'] * reg_loss
+        return total_loss
