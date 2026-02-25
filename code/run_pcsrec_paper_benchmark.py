@@ -46,9 +46,15 @@ def parse_metric_line(line):
 
 
 def run_and_stream(cmd, cwd):
+    env = os.environ.copy()
+    omp_val = env.get('OMP_NUM_THREADS', '').strip()
+    if (not omp_val.isdigit()) or int(omp_val) <= 0:
+        env['OMP_NUM_THREADS'] = '1'
+
     proc = subprocess.Popen(
         cmd,
         cwd=cwd,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         text=True,
