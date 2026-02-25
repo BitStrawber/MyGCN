@@ -8,7 +8,6 @@ import time
 import Procedure
 from os.path import join
 import os
-from tqdm import tqdm
 
 
 def _format_seconds(seconds):
@@ -57,8 +56,7 @@ else:
 try:
     train_total_start = time.time()
     best_ndcg = None
-    epoch_bar = tqdm(range(world.TRAIN_epochs), desc='Training', unit='epoch')
-    for epoch in epoch_bar:
+    for epoch in range(world.TRAIN_epochs):
         epoch_start = time.time()
         test_time = 0.0
         valid_time = 0.0
@@ -104,14 +102,6 @@ try:
             f"(train={_format_seconds(train_time)}, test={_format_seconds(test_time)}, valid={_format_seconds(valid_time)}), "
             f"elapsed={_format_seconds(elapsed)}, eta={_format_seconds(eta)}"
         )
-        postfix = {'eta': _format_seconds(eta)}
-        if world.model_name == 'pcsrec':
-            postfix['loss'] = f"{pcs_loss:.4f}"
-            if best_ndcg is not None:
-                postfix['best_ndcg'] = f"{best_ndcg:.4f}"
-            if curr_valid_ndcg is not None:
-                postfix['valid_ndcg'] = f"{curr_valid_ndcg:.4f}"
-        epoch_bar.set_postfix(postfix)
         torch.save(Recmodel.state_dict(), weight_file)
 finally:
     total_train_time = time.time() - train_total_start if 'train_total_start' in locals() else 0.0

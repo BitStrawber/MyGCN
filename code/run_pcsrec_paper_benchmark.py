@@ -170,16 +170,16 @@ def save_reports(report_dir, run_report, table_rows):
 def parse_args():
     parser = argparse.ArgumentParser(description='Run PCSRec on 3 paper datasets and compare with paper results')
     parser.add_argument('--datasets', type=str, default='amazon_video,amazon_instrument,amazon_crafts')
-    parser.add_argument('--seeds', type=str, default='2020,2021,2022')
+    parser.add_argument('--seeds', type=str, default='2020,2021')
     parser.add_argument('--preprocess', type=int, default=1, help='1: run preprocess before training')
 
     parser.add_argument('--epochs', type=int, default=200)
-    parser.add_argument('--bpr_batch', type=int, default=2048)
+    parser.add_argument('--bpr_batch', type=int, default=4096)
     parser.add_argument('--recdim', type=int, default=64)
     parser.add_argument('--layer', type=int, default=3)
     parser.add_argument('--lr', type=float, default=0.001)
-    parser.add_argument('--decay', type=float, default=1e-4)
-    parser.add_argument('--testbatch', type=int, default=128)
+    parser.add_argument('--decay', type=float, default=5e-4)
+    parser.add_argument('--testbatch', type=int, default=256)
     parser.add_argument('--topks', type=str, default='[10,20]')
     parser.add_argument('--tensorboard', type=int, default=0)
 
