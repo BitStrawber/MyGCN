@@ -3,20 +3,19 @@ import gzip
 import json
 import os
 import urllib.request
+import numpy as np
 
 # ================= 配置区 =================
-# 1. 修改下载链接为 Stanford SNAP 源 (2014版，稳定可用)
 url = "http://snap.stanford.edu/data/amazon/productGraph/categoryFiles/reviews_Musical_Instruments_5.json.gz"
-
-# 2. 设置文件保存路径 (建议放在 raw_data 目录下)
-raw_dir = "raw_data/amazon"
-os.makedirs(raw_dir, exist_ok=True) # 自动创建目录
+raw_dir = "../raw_data/amazon"
+os.makedirs(raw_dir, exist_ok=True)
 file_path = os.path.join(raw_dir, "Musical_Instruments_5.json.gz")
+out_dir = "../data/amazon_instrument"
+os.makedirs(out_dir, exist_ok=True)
 
 # ================= 下载逻辑 =================
 if not os.path.exists(file_path):
     print(f"Downloading Amazon-Instrument dataset from SNAP...")
-    print(f"Source: {url}")
     try:
         urllib.request.urlretrieve(url, file_path)
         print("Download success!")
@@ -30,56 +29,82 @@ else:
 print("Processing data (this may take a moment)...")
 
 data = []
-try:
-    with gzip.open(file_path, 'rb') as f:
-        for line in f:
-            data.append(json.loads(line))
-except OSError:
-    print("Error: The file seems corrupted. Please delete it and run the script again.")
-    exit()
+with gzip.open(file_path, 'rb') as f:
+    for line in f:
+        data.append(json.loads(line))
 
 df = pd.DataFrame(data)[['reviewerID', 'asin', 'overall']]
 df.columns = ['user', 'item', 'rating']
 
-# 3. 重新映射 ID (0 到 N-1)
-user_map = {u: i for i, u in enumerate(df['user'].unique())}
-item_map = {i: j for j, i in enumerate(df['item'].unique())}
+# 优化4: 使用 pd.factorize 高效进行从0开始的连续ID映射
+df['user_id'], user_index = pd.factorize(df['user'])
+df['item_id'], item_index = pd.factorize(df['item'])
 
-df['user_id'] = df['user'].map(user_map)
-df['item_id'] = df['item'].map(item_map)
+print(f"Stats -> Users: {len(user_index)}, Items: {len(item_index)}, Total Interactions: {len(df)}")
 
-print(f"Stats -> Users: {len(user_map)}, Items: {len(item_map)}, Interactions: {len(df)}")
-
-# 4. 区分正负反馈 (论文标准: >=4为正, <4为负)
-df_pos = df[df['rating'] >= 4.0].copy()
-df_neg = df[df['rating'] < 4.0].copy()
+# 区分正负反馈 (论文标准: >=4为正, <4为负)
+df['sign'] = np.where(df['rating'] >= 4.0, 1, -1)
+df_pos = df[df['sign'] == 1].copy()
+df_neg = df[df['sign'] == -1].copy()
 
 print(f"Positive Edges: {len(df_pos)}, Negative Edges: {len(df_neg)}")
 
-# 5. 划分数据集 7:1:2 (仅对正反馈进行划分)
-shuffled_pos = df_pos.sample(frac=1, random_state=42).reset_index(drop=True)
-n = len(shuffled_pos)
-train_pos = shuffled_pos.iloc[:int(n*0.7)]
-valid_pos = shuffled_pos.iloc[int(n*0.7):int(n*0.8)]
-test_pos = shuffled_pos.iloc[int(n*0.8):]
 
-# 6. 保存为 LightGCN 格式
-out_dir = "data/amazon_instrument"
-os.makedirs(out_dir, exist_ok=True)
+# ================= 优化1 & 3: 按用户分组进行 7:1:2 划分 =================
+def split_by_user(data_df):
+    """按用户将数据划分为 7:1:2，确保尽量避免孤立节点"""
+    # 打乱数据
+    data_df = data_df.sample(frac=1, random_state=42).reset_index(drop=True)
 
+    train_list, valid_list, test_list = [], [], []
+
+    for _, group in data_df.groupby('user_id'):
+        n = len(group)
+        if n >= 3:
+            train_end = int(n * 0.7)
+            valid_end = int(n * 0.8)
+            # 保证训练集至少有1条
+            train_end = max(1, train_end)
+            valid_end = max(train_end + 1, valid_end)
+
+            train_list.append(group.iloc[:train_end])
+            valid_list.append(group.iloc[train_end:valid_end])
+            test_list.append(group.iloc[valid_end:])
+        else:
+            # 如果某个用户正/负交互极少，全放入训练集防止报错
+            train_list.append(group)
+
+    return pd.concat(train_list), pd.concat(valid_list) if valid_list else pd.DataFrame(), pd.concat(
+        test_list) if test_list else pd.DataFrame()
+
+
+print("Splitting positive edges...")
+train_pos, valid_pos, test_pos = split_by_user(df_pos)
+print("Splitting negative edges...")
+train_neg, valid_neg, test_neg = split_by_user(df_neg)
+
+
+# ================= 文件写入 =================
 def write_txt(data, path):
-    # 聚合操作
+    if data.empty:
+        open(path, 'w').close()
+        return
     grouped = data.groupby('user_id')['item_id'].apply(list)
     with open(path, 'w') as f:
         for u, items in grouped.items():
-            # 将 item list 转为字符串，中间用空格隔开
             item_str = " ".join(map(str, items))
             f.write(f"{u} {item_str}\n")
 
-print(f"Writing files to {out_dir}...")
-write_txt(train_pos, f"{out_dir}/train_pos.txt")
-write_txt(df_neg, f"{out_dir}/train_neg.txt")
-write_txt(valid_pos, f"{out_dir}/valid.txt")
-write_txt(test_pos, f"{out_dir}/test.txt")
 
-print("All Done! Ready to run main.py.")
+print(f"Writing files to {out_dir}...")
+# 保存正向图数据
+write_txt(train_pos, f"{out_dir}/train_pos.txt")
+write_txt(valid_pos, f"{out_dir}/valid_pos.txt")
+write_txt(test_pos, f"{out_dir}/test_pos.txt")
+
+# 保存负向图数据 (优化2: 必须保存负反馈的测试数据以供后续分析)
+write_txt(train_neg, f"{out_dir}/train_neg.txt")
+write_txt(valid_neg, f"{out_dir}/valid_neg.txt")
+write_txt(test_neg, f"{out_dir}/test_neg.txt")
+
+print("All Done! Preprocessing complete.")
