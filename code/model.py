@@ -240,11 +240,20 @@ class PCSRec(BasicModel):
         self.f = nn.Sigmoid()
         self.optimizer = torch.optim.Adam(self.parameters(), lr=self.lr)
 
-        self.Graph_pos, self.Graph_neg, self.PathMats = self.dataset.getSignedGraphComponents()
+        self.Graph_pos, self.Graph_neg, self.Graph_neg_lap, self.PathMats = self.dataset.getSignedGraphComponents()
         self.Graph_pos = self.Graph_pos.coalesce().to(world.device)
         self.Graph_neg = self.Graph_neg.coalesce().to(world.device)
+        self.Graph_neg_lap = self.Graph_neg_lap.coalesce().to(world.device)
         self.PathMats = [mat.coalesce().to(world.device) for mat in self.PathMats]
-        self.Graph_neg_lap = None
+        self._cached_eval_embeddings = None
+
+    def train(self, mode: bool = True):
+        if mode:
+            self._cached_eval_embeddings = None
+        return super().train(mode)
+
+    def clear_eval_cache(self):
+        self._cached_eval_embeddings = None
         
     def _sparse_softmax_normalize(self, indices, values, num_nodes):
         """实现公式(2) 行级稀疏 Softmax"""
@@ -284,6 +293,9 @@ class PCSRec(BasicModel):
         前向传播计算最终 Embeddings
         包含 PEE 和 PCF 模块
         """
+        if (not self.training) and self._cached_eval_embeddings is not None:
+            return self._cached_eval_embeddings
+
         users_emb = self.embedding_user.weight
         items_emb = self.embedding_item.weight
         all_emb = torch.cat([users_emb, items_emb])
@@ -293,13 +305,6 @@ class PCSRec(BasicModel):
         P_matrix = self._build_path_weighted_matrix(num_nodes)
         E_0 = torch.sparse.mm(P_matrix, all_emb)
         embs = [E_0]
-
-        if self.Graph_neg_lap is None:
-            eye_idx = torch.arange(num_nodes, device=world.device, dtype=torch.long)
-            eye_indices = torch.stack([eye_idx, eye_idx], dim=0)
-            eye_values = torch.ones(num_nodes, device=world.device, dtype=torch.float32)
-            eye = torch.sparse_coo_tensor(eye_indices, eye_values, (num_nodes, num_nodes)).coalesce()
-            self.Graph_neg_lap = (eye - self.Graph_neg).coalesce()
 
         E_l = E_0
         for _ in range(self.n_layers):
@@ -311,6 +316,8 @@ class PCSRec(BasicModel):
         embs = torch.stack(embs, dim=1)
         light_out = torch.sum(embs, dim=1)
         users, items = torch.split(light_out, [self.num_users, self.num_items])
+        if not self.training:
+            self._cached_eval_embeddings = (users, items)
         return users, items
     
     def getUsersRating(self, users):

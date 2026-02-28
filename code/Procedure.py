@@ -80,6 +80,8 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0, evalDict=None, tag='Test
     Recmodel: model.LightGCN
     # eval mode with no dropout
     Recmodel = Recmodel.eval()
+    if hasattr(Recmodel, 'clear_eval_cache'):
+        Recmodel.clear_eval_cache()
     max_K = max(world.topks)
     if multicore == 1:
         pool = multiprocessing.Pool(CORES)
@@ -102,7 +104,6 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0, evalDict=None, tag='Test
         total_batch = len(users) // u_batch_size + 1
         for batch_users in utils.minibatch(users, batch_size=u_batch_size):
             allPos = dataset.getUserPosItems(batch_users)
-            allNeg = dataset.getUserNegItems(batch_users) if hasattr(dataset, 'getUserNegItems') else None
             groundTrue = [testDict[u] for u in batch_users]
             batch_users_gpu = torch.Tensor(batch_users).long()
             batch_users_gpu = batch_users_gpu.to(world.device)
@@ -114,10 +115,6 @@ def Test(dataset, Recmodel, epoch, w=None, multicore=0, evalDict=None, tag='Test
             for range_i, items in enumerate(allPos):
                 exclude_index.extend([range_i] * len(items))
                 exclude_items.extend(items)
-            if allNeg is not None and world.model_name == 'pcsrec':
-                for range_i, items in enumerate(allNeg):
-                    exclude_index.extend([range_i] * len(items))
-                    exclude_items.extend(items)
             rating[exclude_index, exclude_items] = -(1<<10)
             _, rating_K = torch.topk(rating, k=max_K)
             rating = rating.cpu().numpy()

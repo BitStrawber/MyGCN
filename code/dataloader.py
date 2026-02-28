@@ -310,6 +310,7 @@ class Loader(BasicDataset):
 
         self.Graph_pos = None
         self.Graph_neg = None
+        self.Graph_neg_lap = None
         self.PathMats = None
         self._init_signed_feedback_if_needed()
 
@@ -388,8 +389,13 @@ class Loader(BasicDataset):
                     neg_i.append(i)
 
         if len(pos_u) > 0:
-            self.posUserItemNet = csr_matrix((np.ones(len(pos_u), dtype=np.float32), (np.array(pos_u), np.array(pos_i))),
+            base_pos_u, base_pos_i = self.UserItemNet.nonzero()
+            cat_u = np.concatenate([base_pos_u, np.array(pos_u, dtype=np.int64)])
+            cat_i = np.concatenate([base_pos_i, np.array(pos_i, dtype=np.int64)])
+            self.posUserItemNet = csr_matrix((np.ones(len(cat_u), dtype=np.float32), (cat_u, cat_i)),
                                              shape=(self.n_user, self.m_item))
+            self.posUserItemNet.data = np.ones_like(self.posUserItemNet.data, dtype=np.float32)
+            self.posUserItemNet.eliminate_zeros()
         if len(neg_u) > 0:
             self.negUserItemNet = csr_matrix((np.ones(len(neg_u), dtype=np.float32), (np.array(neg_u), np.array(neg_i))),
                                              shape=(self.n_user, self.m_item))
@@ -422,6 +428,12 @@ class Loader(BasicDataset):
         d_mat = sp.diags(d_inv)
         return d_mat.dot(adj).dot(d_mat).tocsr()
 
+    def _normalized_laplacian(self, adj):
+        norm_adj = self._normalize_adj(adj)
+        lap = sp.eye(adj.shape[0], dtype=np.float32, format='csr') - norm_adj
+        lap.eliminate_zeros()
+        return lap.tocsr()
+
     def _binarize_adj(self, adj):
         bin_adj = adj.copy().tocsr()
         bin_adj.data = np.ones_like(bin_adj.data, dtype=np.float32)
@@ -429,14 +441,15 @@ class Loader(BasicDataset):
         return bin_adj
 
     def getSignedGraphComponents(self):
-        if self.Graph_pos is not None and self.Graph_neg is not None and self.PathMats is not None:
-            return self.Graph_pos, self.Graph_neg, self.PathMats
+        if self.Graph_pos is not None and self.Graph_neg is not None and self.Graph_neg_lap is not None and self.PathMats is not None:
+            return self.Graph_pos, self.Graph_neg, self.Graph_neg_lap, self.PathMats
 
         pos_adj = self._build_bipartite_adj(self.posUserItemNet)
         neg_adj = self._build_bipartite_adj(self.negUserItemNet)
 
         self.Graph_pos = self._convert_sp_mat_to_sp_tensor(self._normalize_adj(pos_adj)).coalesce().to(world.device)
         self.Graph_neg = self._convert_sp_mat_to_sp_tensor(self._normalize_adj(neg_adj)).coalesce().to(world.device)
+        self.Graph_neg_lap = self._convert_sp_mat_to_sp_tensor(self._normalized_laplacian(neg_adj)).coalesce().to(world.device)
 
         x1 = self._binarize_adj(pos_adj)
         x2 = self._binarize_adj(neg_adj)
@@ -452,7 +465,7 @@ class Loader(BasicDataset):
             self._convert_sp_mat_to_sp_tensor(x5).coalesce().to(world.device),
             self._convert_sp_mat_to_sp_tensor(x6).coalesce().to(world.device),
         ]
-        return self.Graph_pos, self.Graph_neg, self.PathMats
+        return self.Graph_pos, self.Graph_neg, self.Graph_neg_lap, self.PathMats
 
     def _convert_sp_mat_to_sp_tensor(self, X):
         coo = X.tocoo().astype(np.float32)
